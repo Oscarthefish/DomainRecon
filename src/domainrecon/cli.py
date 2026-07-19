@@ -38,17 +38,27 @@ def scan(
     allow_private: Annotated[
         bool, typer.Option(help="Permit RFC1918/internal targets (requires --authorized)")
     ] = False,
+    enumerate_buckets: Annotated[
+        bool, typer.Option("--enumerate-buckets", help="Probe cloud storage bucket name candidates (requires --authorized)")
+    ] = False,
+    deep_js: Annotated[
+        bool, typer.Option("--deep-js", help="Fetch and analyze JavaScript files for endpoints and secrets (requires --authorized)")
+    ] = False,
 ) -> None:
     """Discover and map assets. Direct probes require --authorized."""
     if not passive and not authorized:
         raise typer.BadParameter("active mode requires --authorized; otherwise use --passive")
     if allow_private and not authorized:
         raise typer.BadParameter("--allow-private requires --authorized")
+    if enumerate_buckets and not authorized:
+        raise typer.BadParameter("--enumerate-buckets requires --authorized")
+    if deep_js and not authorized:
+        raise typer.BadParameter("--deep-js requires --authorized")
     try:
         scope = Scope.build(targets, exclude)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    options = ProbeOptions(timeout=timeout, concurrency=concurrency, allow_private=allow_private)
+    options = ProbeOptions(timeout=timeout, concurrency=concurrency, allow_private=allow_private, enumerate_buckets=enumerate_buckets, deep_js=deep_js)
     result = asyncio.run(ReconEngine(scope, options).run(passive_only=passive, max_hosts=max_hosts))
     write_reports(result, output)
     with Store(output / "domainrecon.sqlite3") as store:

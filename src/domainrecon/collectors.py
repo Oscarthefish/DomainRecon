@@ -15,6 +15,7 @@ import httpx
 
 from .models import Asset, Edge, Finding, ScanResult, Severity
 from .scope import Scope
+from .javascript import analyze_javascript
 from .scoring import score_schema_operations
 from .secrets import scan_body
 
@@ -31,6 +32,8 @@ class ProbeOptions:
     allow_private: bool = False
     user_agent: str = "DomainRecon/0.1 (+authorized-security-assessment)"
     enrich_external: bool = True
+    enumerate_buckets: bool = False
+    deep_js: bool = False
 
 
 class DNSCollector:
@@ -386,6 +389,8 @@ class WebCollector:
                 self._classify_surface(url, response, result)
                 await self._probe_exposures(client, scheme, host, root, result)
                 await self._probe_cors_and_methods(client, url, result)
+                if self.options.deep_js and "html" in response.headers.get("content-type", "").lower():
+                    await analyze_javascript(url, response.text[:100_000], root, result, client)
                 break
 
     async def _probe_exposures(self, client, scheme, host, root, result) -> None:

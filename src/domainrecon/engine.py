@@ -5,6 +5,8 @@ import shutil
 import uuid
 from collections import defaultdict
 
+from .breach import check_breach_exposure
+from .cloud import enumerate_buckets
 from .collectors import CTCollector, DNSCollector, ProbeOptions, TLSCollector, WebCollector
 from .enrichment import EnrichmentCollector
 from .models import Asset, Edge, ScanResult
@@ -51,6 +53,9 @@ class ReconEngine:
 
         await asyncio.gather(*(inspect(host) for host in hosts))
         await check_takeovers(result, timeout=self.options.timeout)
+        await asyncio.gather(*(check_breach_exposure(root, result, self.options.timeout) for root in self.scope.roots))
+        if self.options.enumerate_buckets:
+            await asyncio.gather(*(enumerate_buckets(root, result, self.options.timeout) for root in self.scope.roots))
         if self.options.enrich_external:
             await self.enrichment.collect(result)
         self._correlate(result)
