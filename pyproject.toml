@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "domainrecon"
+version = "0.1.0"
+description = "Scope-aware domain fingerprinting, relationship mapping, and exposure assessment"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "DomainRecon contributors"}]
+dependencies = [
+  "dnspython>=2.6,<3",
+  "httpx>=0.27,<1",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "typer>=0.12,<1",
+  "rich>=13.7,<15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1", "ruff>=0.6,<1"]
+screenshots = ["playwright>=1.50,<2"]
+
+[project.scripts]
+domainrecon = "domainrecon.cli:app"
+domainrecon-web = "domainrecon.web:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/domainrecon"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
