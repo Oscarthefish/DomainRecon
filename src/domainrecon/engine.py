@@ -9,6 +9,7 @@ from .collectors import CTCollector, DNSCollector, ProbeOptions, TLSCollector, W
 from .enrichment import EnrichmentCollector
 from .models import Asset, Edge, ScanResult
 from .scope import Scope
+from .takeover import check_takeovers
 
 
 class ReconEngine:
@@ -49,6 +50,7 @@ class ReconEngine:
                     )
 
         await asyncio.gather(*(inspect(host) for host in hosts))
+        await check_takeovers(result, timeout=self.options.timeout)
         if self.options.enrich_external:
             await self.enrichment.collect(result)
         self._correlate(result)

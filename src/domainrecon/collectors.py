@@ -15,6 +15,8 @@ import httpx
 
 from .models import Asset, Edge, Finding, ScanResult, Severity
 from .scope import Scope
+from .scoring import score_schema_operations
+from .secrets import scan_body
 
 
 def is_public_ip(value: str) -> bool:
@@ -38,6 +40,13 @@ class DNSCollector:
         self.scope, self.options = scope, options
         self.resolver = dns.asyncresolver.Resolver()
         self.resolver.lifetime = options.timeout
+
+    # Common DKIM selectors to probe during email security audit
+    _DKIM_SELECTORS = (
+        "default", "google", "selector1", "selector2", "amazonses",
+        "mandrill", "sendgrid", "s1", "s2", "k1", "k2", "mail",
+        "email", "dkim", "proofpoint", "mimecast",
+    )
 
     async def collect(self, host: str, result: ScanResult) -> None:
         root = self.scope.root_for(host)
@@ -68,32 +77,137 @@ class DNSCollector:
                 result.add_asset(asset)
                 result.add_edge(Edge(f"domain:{host}", asset.key, record_type.lower(), value))
                 if record_type == "TXT":
-                    self._mail_findings(host, value, result)
+                    self._spf_findings(host, value, result)
+        # Full email security audit for root domains only (avoids redundant checks on subdomains)
+        if host == root:
+            await self._audit_email_security(host, result)
 
     @staticmethod
-    def _mail_findings(host: str, value: str, result: ScanResult) -> None:
+    def _spf_findings(host: str, value: str, result: ScanResult) -> None:
         lowered = value.lower()
-        if lowered.startswith("v=spf1") and "+all" in lowered:
+        if not lowered.startswith("v=spf1"):
+            return
+        if "+all" in lowered:
             result.findings.append(
                 Finding(
                     host,
-                    "Permissive SPF policy",
+                    "Permissive SPF policy (+all)",
                     Severity.HIGH,
                     "email-security",
                     value,
-                    "Replace +all with a restrictive ~all or -all policy.",
+                    "Replace +all with -all to hard-fail unauthorized senders.",
                     "dns",
                 )
             )
-        if lowered.startswith("v=dmarc1") and "p=none" in lowered:
+        elif "~all" in lowered:
             result.findings.append(
                 Finding(
                     host,
-                    "DMARC is monitoring only",
-                    Severity.LOW,
+                    "SPF soft-fail policy (~all)",
+                    Severity.MEDIUM,
                     "email-security",
                     value,
-                    "After monitoring, move to quarantine or reject.",
+                    "Replace ~all with -all; soft-fail still permits spoofed mail delivery.",
+                    "dns",
+                )
+            )
+
+    async def _audit_email_security(self, host: str, result: ScanResult) -> None:
+        """Query DMARC and common DKIM selectors; emit findings for missing or weak controls."""
+        # --- DMARC ---
+        dmarc_record: str | None = None
+        try:
+            answers = await self.resolver.resolve(f"_dmarc.{host}", "TXT", raise_on_no_answer=False)
+            if answers.rrset:
+                for answer in answers:
+                    val = answer.to_text().strip('"')
+                    if "v=dmarc1" in val.lower():
+                        dmarc_record = val
+                        break
+        except (dns.exception.DNSException, OSError):
+            pass
+
+        if dmarc_record is None:
+            result.findings.append(
+                Finding(
+                    host,
+                    "DMARC record absent",
+                    Severity.MEDIUM,
+                    "email-security",
+                    f"No _dmarc.{host} TXT record found",
+                    "Publish a DMARC record starting with v=DMARC1; p=reject to prevent domain spoofing.",
+                    "dns",
+                )
+            )
+        else:
+            lowered = dmarc_record.lower()
+            if "p=none" in lowered:
+                result.findings.append(
+                    Finding(
+                        host,
+                        "DMARC policy is monitoring only (p=none)",
+                        Severity.MEDIUM,
+                        "email-security",
+                        dmarc_record,
+                        "After reviewing RUA reports, move to p=quarantine then p=reject.",
+                        "dns",
+                    )
+                )
+            elif "p=quarantine" in lowered:
+                result.findings.append(
+                    Finding(
+                        host,
+                        "DMARC policy is quarantine — not yet enforcing",
+                        Severity.LOW,
+                        "email-security",
+                        dmarc_record,
+                        "Consider moving to p=reject once you have confirmed legitimate mail sources.",
+                        "dns",
+                    )
+                )
+
+        # --- DKIM selectors ---
+        found_selectors: list[str] = []
+        async def _probe_selector(sel: str) -> str | None:
+            try:
+                answers = await self.resolver.resolve(
+                    f"{sel}._domainkey.{host}", "TXT", raise_on_no_answer=False
+                )
+                if answers.rrset:
+                    for answer in answers:
+                        val = answer.to_text().strip('"')
+                        if "v=dkim1" in val.lower() or "p=" in val.lower():
+                            return sel
+            except (dns.exception.DNSException, OSError):
+                pass
+            return None
+
+        selector_results = await asyncio.gather(
+            *(_probe_selector(s) for s in self._DKIM_SELECTORS)
+        )
+        found_selectors = [s for s in selector_results if s]
+
+        if found_selectors:
+            result.findings.append(
+                Finding(
+                    host,
+                    "DKIM selectors discovered",
+                    Severity.INFO,
+                    "email-security",
+                    f"Active selectors: {', '.join(found_selectors)}",
+                    "Rotate DKIM keys periodically and retire unused selectors.",
+                    "dns",
+                )
+            )
+        else:
+            result.findings.append(
+                Finding(
+                    host,
+                    "No DKIM selectors found",
+                    Severity.LOW,
+                    "email-security",
+                    f"Probed selectors: {', '.join(self._DKIM_SELECTORS)}",
+                    "Publish DKIM records for all mail-sending services to enable receiver authentication.",
                     "dns",
                 )
             )
@@ -196,6 +310,29 @@ class WebCollector:
         "/metrics",
     )
 
+    # Vendor-specific paths: path → (product_name, cve_hint | None)
+    # HIGH if there is a known exploited CVE; MEDIUM for exposed admin panels with no CVE.
+    VENDOR_PATHS: dict[str, tuple[str, str | None]] = {
+        "/vpn/index.html":                        ("Citrix NetScaler",            "CVE-2023-3519"),
+        "/tmui/login.jsp":                        ("F5 BIG-IP Management",        "CVE-2022-1388"),
+        "/tmui/tmui/login/welcome.jsp":           ("F5 BIG-IP Management",        "CVE-2022-1388"),
+        "/remote/login":                          ("Fortinet SSL VPN",             "CVE-2023-27997"),
+        "/dana-na/auth/url_default/welcome.cgi":  ("Pulse Secure VPN",            "CVE-2019-11510"),
+        "/global-protect/login.esp":              ("Palo Alto GlobalProtect",      "CVE-2024-3400"),
+        "/+CSCOE+/logon.html":                   ("Cisco ASA WebVPN",             "CVE-2020-3452"),
+        "/broker/xml":                            ("VMware Horizon",               "CVE-2021-22005"),
+        "/ui/":                                   ("VMware vSphere Web Client",    "CVE-2021-21985"),
+        "/ecp/":                                  ("Microsoft Exchange ECP",       "CVE-2021-26855"),
+        "/owa/auth/logon.aspx":                   ("Microsoft OWA",                None),
+        "/autodiscover/autodiscover.xml":         ("Microsoft Exchange Autodiscover", None),
+        "/Telerik.Web.UI.WebResource.axd":        ("Telerik UI",                  "CVE-2019-18935"),
+        "/manager/html":                          ("Apache Tomcat Manager",        None),
+        "/phpmyadmin/":                           ("phpMyAdmin",                   None),
+        "/solr/admin/":                           ("Apache Solr Admin",            None),
+        "/jenkins/":                              ("Jenkins CI",                   None),
+        "/kibana/":                               ("Kibana",                       None),
+    }
+
     def __init__(self, scope: Scope, options: ProbeOptions):
         self.scope, self.options = scope, options
 
@@ -263,6 +400,7 @@ class WebCollector:
                 continue
             body = response.text[:50_000]
             content_type = response.headers.get("content-type", "").lower()
+            scan_body(url, body, root, result)
             evidence = None
             if path == "/.git/HEAD" and re.match(r"ref:\s+refs/heads/", body):
                 evidence = (
@@ -346,10 +484,57 @@ class WebCollector:
                 Finding(url, name, severity, "exposure", observed, remediation, "http")
             )
 
+        # Vendor product fingerprinting — probes known admin/appliance paths
+        for vpath, (product, cve) in self.VENDOR_PATHS.items():
+            vurl = f"{scheme}://{host}{vpath}"
+            try:
+                vresponse = await client.get(vurl)
+            except httpx.HTTPError:
+                continue
+            if vresponse.status_code not in range(200, 400):
+                continue
+            vcontent_type = vresponse.headers.get("content-type", "").lower()
+            if cve:
+                vseverity = Severity.HIGH
+                vremediation = (
+                    f"Patch immediately — {cve} is a known critical vulnerability for {product}. "
+                    "Restrict management access to trusted networks and apply vendor mitigations."
+                )
+                vname = f"{product} exposed ({cve})"
+            else:
+                vseverity = Severity.MEDIUM
+                vremediation = (
+                    f"Restrict {product} admin panel access to internal or VPN-only networks. "
+                    "Confirm default credentials have been changed and patch to latest version."
+                )
+                vname = f"{product} admin panel exposed"
+            result.add_asset(
+                Asset(
+                    "url",
+                    vurl,
+                    root,
+                    "vendor-fingerprint",
+                    attributes={"status": vresponse.status_code, "content_type": vcontent_type, "product": product},
+                )
+            )
+            result.add_edge(Edge(f"domain:{host}", f"url:{vurl}", "exposes", vname))
+            result.findings.append(
+                Finding(
+                    vurl,
+                    vname,
+                    vseverity,
+                    "vendor-exposure",
+                    f"HTTP {vresponse.status_code}; {product} path {vpath} accessible",
+                    vremediation,
+                    "http",
+                )
+            )
+
     @staticmethod
     def _analyze_api_schema(url: str, body: str, result: ScanResult) -> None:
+        import json as _json
         try:
-            schema = __import__("json").loads(body)
+            schema = _json.loads(body)
         except (ValueError, TypeError):
             return
         paths = schema.get("paths") if isinstance(schema, dict) else None
@@ -398,6 +583,8 @@ class WebCollector:
                     "openapi",
                 )
             )
+        root = next(iter({a.root_domain for a in result.assets.values() if a.kind == "domain"}), "")
+        score_schema_operations(url, schema, root, result)
 
     @staticmethod
     async def _probe_cors_and_methods(client, url: str, result: ScanResult) -> None:
