@@ -2,6 +2,8 @@
 
 DomainRecon inventories domains and subdomains, fingerprints DNS/TLS/HTTP services, maps shared infrastructure between multiple root domains, and reports non-invasive security configuration findings.
 
+![DomainRecon report from a passive scan of example.com](docs/screenshots/report.png)
+
 It is deliberately narrower than [reconFTW](https://github.com/six2dez/reconftw): Python owns orchestration, normalized evidence, correlation, and reporting. It does not exploit vulnerabilities, spray credentials, download breach dumps, or silently run third-party scanners. This makes the default workflow reproducible and suitable for authorized asset-management and defensive security work.
 
 ## Capabilities
@@ -87,3 +89,9 @@ The HTTP client does not follow redirects and rejects hosts resolving to private
 ## Extension points
 
 Collectors operate on the shared `ScanResult` model. Add a collector under `src/domainrecon/`, retain source/evidence on every asset and finding, enforce `Scope.contains()` before network access, and place intrusive integrations behind a separate authorization/profile gate. Suitable future adapters include Subfinder (passive enumeration), httpx (large-scale probing), Nuclei with a curated non-destructive template allowlist, and RDAP providers.
+
+## Credits and licence
+
+Several checks (email security audit, vendor fingerprinting, subdomain takeover fingerprints, the secret pattern catalogue, endpoint scoring and cloud bucket enumeration) were adapted from [Claude-OSINT](https://github.com/elementalsouls/Claude-OSINT) by Sachin Sharma, used under the MIT License. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+DomainRecon is released under the MIT License. See [LICENSE](LICENSE).
