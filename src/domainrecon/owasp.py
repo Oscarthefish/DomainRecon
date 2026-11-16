@@ -130,7 +130,12 @@ def mappings_for(category: str) -> list[str]:
     return list(CATEGORY_MAP.get(category, ()))
 
 
-def coverage(findings: Iterable[dict[str, Any]], has_api: bool = False) -> dict[str, Any]:
+_PASSIVE_NOTE = "Not run: passive scans use DNS and public data only, so no web checks were made."
+
+
+def coverage(
+    findings: Iterable[dict[str, Any]], has_api: bool = False, passive_only: bool = False
+) -> dict[str, Any]:
     finding_rows = list(findings)
     signalled = {item for row in finding_rows for item in row.get("owasp", [])}
 
@@ -138,6 +143,8 @@ def coverage(findings: Iterable[dict[str, Any]], has_api: bool = False) -> dict[
         output = []
         for identifier, (name, default, note) in catalog.items():
             state = "signal" if identifier in signalled else default
+            if passive_only and state == "tested":
+                state, note = "not run", _PASSIVE_NOTE
             matched = [row for row in finding_rows if identifier in row.get("owasp", [])]
             assets = sorted({str(row.get("asset", "")) for row in matched if row.get("asset")})
             domains = sorted(
@@ -169,5 +176,5 @@ def hydrate_result(data: dict[str, Any]) -> dict[str, Any]:
     for finding in findings:
         finding.setdefault("owasp", mappings_for(str(finding.get("category", ""))))
     has_api = any(item.get("category") in {"api", "api-auth"} for item in findings)
-    data["owasp_coverage"] = coverage(findings, has_api)
+    data["owasp_coverage"] = coverage(findings, has_api, passive_only=bool(data.get("passive_only")))
     return data

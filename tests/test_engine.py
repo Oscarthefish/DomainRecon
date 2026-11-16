@@ -46,7 +46,8 @@ def test_api_schema_generates_inventory_and_authentication_lead():
     result = ScanResult("id", ["example.com"])
     body = """{"openapi":"3.0.0","paths":{"/admin/users":{"get":{}},"/health":{"get":{"security":[]}}}}"""
     WebCollector._analyze_api_schema("https://api.example.com/openapi.json", body, result)
-    assert {finding.category for finding in result.findings} == {"api", "api-auth"}
+    # /admin/users is also flagged as a high-interest operation by the endpoint scorer.
+    assert {finding.category for finding in result.findings} == {"api", "api-auth", "api-scoring"}
     serialized = result.to_dict()
     auth = next(item for item in serialized["findings"] if item["category"] == "api-auth")
     assert "API5:2023" in auth["owasp"]

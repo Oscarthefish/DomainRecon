@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import re
+import secrets
 import socket
 import ssl
 from dataclasses import dataclass
@@ -34,6 +35,18 @@ class ProbeOptions:
     enrich_external: bool = True
     enumerate_buckets: bool = False
     deep_js: bool = False
+
+
+_DKIM_P_TAG = re.compile(r"(?:^|;)\s*p\s*=([^;]*)", re.IGNORECASE)
+
+
+def dkim_key_status(record: str) -> str | None:
+    """Classify a DKIM TXT record: "active", "revoked" (empty p=) or None if not DKIM."""
+    lowered = record.lower()
+    match = _DKIM_P_TAG.search(record)
+    if not match:
+        return "active" if "v=dkim1" in lowered else None
+    return "active" if match.group(1).strip() else "revoked"
 
 
 class DNSCollector:
@@ -170,35 +183,68 @@ class DNSCollector:
                 )
 
         # --- DKIM selectors ---
-        found_selectors: list[str] = []
         async def _probe_selector(sel: str) -> str | None:
+            """Return "active", "revoked" (empty p= per RFC 6376) or None."""
             try:
                 answers = await self.resolver.resolve(
                     f"{sel}._domainkey.{host}", "TXT", raise_on_no_answer=False
                 )
                 if answers.rrset:
                     for answer in answers:
-                        val = answer.to_text().strip('"')
-                        if "v=dkim1" in val.lower() or "p=" in val.lower():
-                            return sel
+                        status = dkim_key_status("".join(
+                            part.decode(errors="replace") for part in answer.strings
+                        ))
+                        if status:
+                            return status
             except (dns.exception.DNSException, OSError):
                 pass
             return None
 
-        selector_results = await asyncio.gather(
-            *(_probe_selector(s) for s in self._DKIM_SELECTORS)
-        )
-        found_selectors = [s for s in selector_results if s]
+        # A wildcard *._domainkey record answers for every selector, so a hit
+        # on a random name means the per-selector results prove nothing.
+        wildcard = await _probe_selector(f"dr-{secrets.token_hex(6)}")
+        statuses = await asyncio.gather(*(_probe_selector(s) for s in self._DKIM_SELECTORS))
+        active = [s for s, st in zip(self._DKIM_SELECTORS, statuses) if st == "active"]
+        revoked = [s for s, st in zip(self._DKIM_SELECTORS, statuses) if st == "revoked"]
 
-        if found_selectors:
+        if wildcard:
+            result.findings.append(
+                Finding(
+                    host,
+                    "Wildcard DKIM record",
+                    Severity.INFO,
+                    "email-security",
+                    f"Every selector under _domainkey.{host} resolves, including a random one; "
+                    f"the wildcard key is {'revoked (empty p=)' if wildcard == 'revoked' else 'active'}.",
+                    "Confirm the wildcard is intentional. A revoked wildcard is a valid way to say the domain "
+                    "sends no DKIM-signed mail; an active one means any selector validates with the same key.",
+                    "dns",
+                )
+            )
+        elif active:
+            evidence = f"Active selectors: {', '.join(active)}"
+            if revoked:
+                evidence += f". Revoked (empty key): {', '.join(revoked)}"
             result.findings.append(
                 Finding(
                     host,
                     "DKIM selectors discovered",
                     Severity.INFO,
                     "email-security",
-                    f"Active selectors: {', '.join(found_selectors)}",
+                    evidence,
                     "Rotate DKIM keys periodically and retire unused selectors.",
+                    "dns",
+                )
+            )
+        elif revoked:
+            result.findings.append(
+                Finding(
+                    host,
+                    "Only revoked DKIM selectors found",
+                    Severity.LOW,
+                    "email-security",
+                    f"Revoked (empty key): {', '.join(revoked)}",
+                    "If this domain sends mail, publish an active DKIM key for each sending service.",
                     "dns",
                 )
             )

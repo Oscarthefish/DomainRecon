@@ -25,7 +25,7 @@ class ReconEngine:
         self.enrichment = EnrichmentCollector(self.options)
 
     async def run(self, *, passive_only: bool = False, max_hosts: int = 250) -> ScanResult:
-        result = ScanResult(uuid.uuid4().hex[:12], list(self.scope.roots))
+        result = ScanResult(uuid.uuid4().hex[:12], list(self.scope.roots), passive_only=passive_only)
         hosts = set(self.scope.roots)
         subfinder = await asyncio.gather(
             *(self._subfinder(root, result) for root in self.scope.roots)

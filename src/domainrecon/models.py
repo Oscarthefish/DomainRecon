@@ -69,6 +69,7 @@ class ScanResult:
     findings: list[Finding] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     comparison: dict[str, Any] = field(default_factory=dict)
+    passive_only: bool = False
 
     def add_asset(self, asset: Asset) -> None:
         old = self.assets.get(asset.key)
@@ -114,5 +115,6 @@ class ScanResult:
             "findings": findings,
             "errors": self.errors,
             "comparison": self.comparison,
-            "owasp_coverage": coverage(findings, has_api),
+            "passive_only": self.passive_only,
+            "owasp_coverage": coverage(findings, has_api, passive_only=self.passive_only),
         }
